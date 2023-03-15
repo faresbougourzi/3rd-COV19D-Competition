@@ -1,1 +1,1 @@
-# 3rd-COV19D-Competition
+# 3rd COV19D Competition:
