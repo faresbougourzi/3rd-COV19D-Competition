@@ -1,0 +1,330 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Sun Jun 19 22:38:04 2022
+
+@author: bougourzi
+"""
+
+
+
+# from Data_loader4d import  Covid_loader_pt, Covid_loader_pt4
+import torch
+import torch.nn as nn
+import torch.nn.functional as F 
+import torch.optim as optim
+import torchvision
+
+import torchvision.transforms as transforms
+import numpy as np
+
+from tqdm import tqdm
+
+import os
+
+from sklearn.metrics import f1_score, balanced_accuracy_score, confusion_matrix
+
+
+
+img_size = 299
+batch_size = 6
+epochs = 60
+
+############################
+from torch.utils import data
+   
+class Covid_loader_pt4(data.Dataset):
+  'Characterizes a dataset for PyTorch'
+  def __init__(self, list_IDs, path, transform=None):
+        'Initialization'
+        self.list_IDs = list_IDs
+        self.path = path
+        self.transform = transform
+
+  def __len__(self):
+        'Denotes the total number of samples'
+        return len(self.list_IDs)
+
+  def __getitem__(self, index):
+        'Generates one sample of data'
+        # Select sample
+        ID = self.list_IDs[index]
+        pth = self.path
+        
+        labels = np.load(os.path.join(pth, 'labels.npy'))[ID]        
+        X  = np.load(os.path.join(pth, str(ID) + '_lung.npy'))
+
+        if self.transform is not None:
+            Xs = []
+            for i in range(X.shape[2]):
+                Xs.append(self.transform(X[:,:,i]))
+       
+        Xs = torch.stack(Xs).squeeze(dim = 1)
+        Xs1 = F.interpolate(Xs.unsqueeze(dim = 0).unsqueeze(dim = 0), [32, 299, 299])
+        Xs2 = F.interpolate(Xs.unsqueeze(dim = 0).unsqueeze(dim = 0), [16, 299, 299])
+
+
+        return Xs1, Xs2, labels   
+
+train_transforms = transforms.Compose([
+        transforms.ToPILImage(mode='L'),
+        transforms.Resize((img_size,img_size)),
+        transforms.RandomRotation(degrees = (-10,10)),
+        transforms.RandomApply([transforms.ColorJitter(brightness=(0.7,1.5), contrast=0, saturation=0, hue=0)],p=0.1),
+        transforms.RandomApply([transforms.ColorJitter(brightness=0, contrast=(0.7,1.5), saturation=0, hue=0)],p=0.1),
+        transforms.RandomApply([transforms.ColorJitter(brightness=0, contrast=0, saturation=(0.7,1.5), hue=0)],p=0.1),       
+        transforms.CenterCrop(img_size),
+        transforms.ToTensor(),
+])
+
+        
+test_transforms = transforms.Compose([
+        transforms.ToPILImage(mode='L'),
+        transforms.Resize((img_size,img_size)),
+        transforms.CenterCrop(img_size),
+        transforms.ToTensor(),
+])
+
+
+torch.set_printoptions(linewidth=120)
+
+tr_path = './NumpysSevSeg/Train'
+vl_path = './NumpysSevSeg/Val'
+
+tr_labels = np.load('./NumpysSevSeg/Train/labels.npy')
+vl_labels= np.load('./NumpysSevSeg/Val/labels.npy')
+
+tr_indxs= list(range(len(tr_labels)))
+train_set = Covid_loader_pt4(
+        list_IDs = tr_indxs, 
+        path = tr_path, 
+        transform=train_transforms
+)
+
+vl_indxs= list(range(len(vl_labels)))
+test_set = Covid_loader_pt4(
+        list_IDs = vl_indxs, 
+        path = vl_path, 
+        transform=test_transforms
+)
+
+#######
+class FocalLoss(nn.Module):
+    "Non weighted version of Focal Loss"
+    def __init__(self, gamma=1.5):
+        super(FocalLoss, self).__init__()
+        self.gamma = gamma
+
+    def forward(self, inputs, targets):
+        BCE_loss = F.cross_entropy(inputs, targets, reduction='none')
+        targets = targets.type(torch.long)
+        pt = torch.exp(-BCE_loss)
+        F_loss = (1-pt)**self.gamma * BCE_loss
+        return F_loss.mean()
+    
+def get_num_correct(preds, labels):
+    return preds.argmax(dim=1).eq(labels).sum().item()     
+
+class TwoInputsNet(nn.Module):
+    def __init__(self):
+        super(TwoInputsNet, self).__init__()
+        # self.encoder1 = DoubleConv(64, 3)
+        self.encoder1 =  nn.Conv2d(32, 3, kernel_size = 3, stride = 1, padding = 1)
+        self.encoder2 =  nn.Conv2d(16, 3, kernel_size = 3, stride = 1, padding = 1)
+        self.encoder3 =  nn.Conv2d(6, 3, kernel_size = 3, stride = 1, padding = 1)
+
+        # self.encoder22 =  nn.Conv2d(9, 3, kernel_size = 3, stride = 1, padding = 1)
+        # self.model = torchvision.models.resnext50_32x4d(pretrained=True)
+        self.model = torchvision.models.inception_v3(pretrained=True)
+        # self.model = torchvision.models.resnet18(pretrained=True)
+
+        # self.model.classifier  =  nn.Linear(2208, 4) 
+        self.model.fc  =  nn.Linear(2048, 4) 
+        self.act = nn.ReLU(inplace=True)
+
+    def forward(self, input1, input2):
+        out1 = self.act(self.encoder1(input1))
+        out2 = self.act(self.encoder2(input2))
+        out1 = self.act(self.encoder3(torch.cat([out1, out2], dim = 1)))
+        out1 = self.model(out1)
+        return out1
+####################################
+
+torch.set_grad_enabled(True)
+torch.set_printoptions(linewidth=120)    
+
+
+def MAE_distance(preds, labels):
+    return torch.sum(torch.abs(preds - labels))
+
+def Adaptive_loss(preds, labels, sigma):
+    mse = (1+sigma)*((preds - labels)**2)
+    mae = sigma + (torch.abs(preds - labels))
+    return torch.mean(mse/mae)
+
+def PC_mine(preds, labels):
+    dem = np.sum((preds - np.mean(preds))*(labels - np.mean(labels)))
+    mina = (np.sqrt(np.sum((preds - np.mean(preds))**2)))*(np.sqrt(np.sum((labels - np.mean(labels))**2)))
+    return dem/mina 
+
+
+device = torch.device("cuda:0") 
+model = TwoInputsNet().to(device)     
+train_loader = torch.utils.data.DataLoader(train_set, batch_size = 8, shuffle = True)      
+validate_loader = torch.utils.data.DataLoader(test_set, batch_size = 32)
+criterion = FocalLoss()
+
+epoch_count = []
+Accracy_tr = []
+Accracy_ts = []
+
+Acc_best = -2
+saving_models = "./Models 3df"
+if not os.path.exists(saving_models):
+    os.makedirs(saving_models)
+name = './Models 3df/Incept_2inp4BN_focal_best.pt'
+##################################   20 0.0001  ############################################################    
+for epoch in range(40):
+    epoch_count.append(epoch)
+    lr = 0.0001
+    if epoch > 15:
+        lr = 0.00001
+    if epoch > 30:
+        lr = 0.000001
+
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    #optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9)
+    train_loss = 0
+    validation_loss = 0
+    total_correct_tr = 0
+    total_correct_val = 0
+    total_correct_tr2 = 0
+    total_correct_val2 = 0
+
+    label_f1tr = []
+    pred_f1tr = []
+    
+    label_f1tr2 = []
+    pred_f1tr2 = []    
+
+    for batch in tqdm(train_loader):
+        images1,images2, labels = batch
+        images1 = images1.squeeze(dim=1).squeeze(dim=1).float().to(device)
+        images2 = images2.squeeze(dim=1).squeeze(dim=1).float().to(device)
+        # images2 = images2.squeeze(dim = 1).squeeze(dim = 1).float().to(device)
+        # images3 = images3.squeeze(dim = 1).squeeze(dim = 1).float().to(device)
+        labels = labels.long().to(device)
+        # labels2 = labels2.long().to(device)
+        torch.set_grad_enabled(True)
+        model.train()
+        preds, _ = model(images1, images2)
+        loss = criterion(preds, labels)
+        # loss2 = criterion(preds2, labels2)
+        # loss = loss1+0.5*loss2
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        train_loss += loss.item()
+        total_correct_tr += get_num_correct(preds, labels)
+        # total_correct_tr2 += get_num_correct(preds2, labels2)
+
+        label_f1tr.extend(labels.cpu().numpy().tolist())
+        pred_f1tr.extend(preds.argmax(dim=1).tolist())
+        
+        # label_f1tr2.extend(labels2.cpu().numpy().tolist())
+        # pred_f1tr2.extend(preds2.argmax(dim=1).tolist())        
+
+        del images1
+        del labels
+
+    label_f1vl = []
+    pred_f1vl = []
+    label_f1vl2 = []
+    pred_f1vl2 = []    
+
+    for batch in tqdm(validate_loader):
+        images1,images2, labels = batch
+        images1 = images1.squeeze(dim=1).squeeze(dim=1).float().to(device)
+        images2 = images2.squeeze(dim=1).squeeze(dim=1).float().to(device)
+        # images2 = images2.squeeze(dim = 1).squeeze(dim = 1).float().to(device)
+        # images3 = images3.squeeze(dim = 1).squeeze(dim = 1).float().to(device)
+        labels = labels.long().to(device)
+        # labels2 = labels2.long().to(device)
+
+        model.eval()
+        with torch.no_grad():
+            preds = model(images1, images2)
+
+        loss = criterion(preds, labels)
+        # loss2 = criterion(preds2, labels2)
+        # loss = loss1+loss2
+
+        validation_loss += loss.item()
+        total_correct_val += get_num_correct(preds, labels)
+        # total_correct_val2 += get_num_correct(preds2, labels2)
+
+        label_f1vl.extend(labels.cpu().numpy().tolist())
+        pred_f1vl.extend(preds.argmax(dim=1).tolist())
+
+        del images1
+        del labels
+
+    print('Ep: ', epoch, 'AC_tr: ', total_correct_tr/len(train_set), 'AC_ts: ',
+          total_correct_val/len(test_set),'AC_tr2: ', total_correct_tr2/len(train_set), 'AC_ts2: ',
+          total_correct_val2/len(test_set), 'Loss_tr: ', train_loss/len(train_set))
+    Acc_best2 = f1_score(label_f1vl, pred_f1vl, average='macro')
+
+    print('MaF1_tr: ', f1_score(label_f1tr, pred_f1tr, average='macro'), 'MaF1_vl: ',
+          f1_score(label_f1vl, pred_f1vl, average='macro'))
+
+    Accracy_tr.append(total_correct_tr/len(train_set))
+    Accracy_ts.append(Acc_best2)
+
+    if Acc_best2 > Acc_best:
+        Acc_best = Acc_best2
+        torch.save(model.state_dict(), name)
+
+print(Acc_best)
+
+
+model.load_state_dict(torch.load(name))
+
+###########################
+###########################
+
+label_f1vl = []
+pred_f1vl = []
+# label_f1vl2 = []
+# pred_f1vl2 = []    
+
+for batch in tqdm(validate_loader):
+    images1,images2, labels = batch
+    images1 = images1.squeeze(dim=1).squeeze(dim=1).float().to(device)
+    images2 = images2.squeeze(dim=1).squeeze(dim=1).float().to(device)
+    # images2 = images2.squeeze(dim = 1).squeeze(dim = 1).float().to(device)
+    # images3 = images3.squeeze(dim = 1).squeeze(dim = 1).float().to(device)
+    labels = labels.long().to(device)
+
+    model.eval()
+    with torch.no_grad():
+        preds = model(images1, images2)
+
+    loss = criterion(preds, labels)
+    # loss2 = criterion(preds2, labels2)
+    # loss = loss1+loss2
+
+    validation_loss += loss.item()
+    total_correct_val += get_num_correct(preds, labels)
+    # total_correct_val2 += get_num_correct(preds2, labels2)
+
+    label_f1vl.extend(labels.cpu().numpy().tolist())
+    pred_f1vl.extend(preds.argmax(dim=1).tolist())
+
+    del images1
+    del labels
+
+print(Acc_best)
+
+print(confusion_matrix(label_f1vl, pred_f1vl))
