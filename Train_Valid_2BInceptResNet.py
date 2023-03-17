@@ -6,10 +6,6 @@ Created on Mon Mar 13 01:35:51 2023
 @author: bougourzi
 """
 
-
-
-
-# from Data_loader4d import  Covid_loader_pt, Covid_loader_pt4
 import torch
 import torch.nn as nn
 import torch.nn.functional as F 
@@ -32,6 +28,7 @@ batch_size = 6
 epochs = 60
 
 ############################
+# The Data Loader
 from torch.utils import data
    
 class Covid_loader_pt4(data.Dataset):
@@ -75,6 +72,8 @@ class Covid_loader_pt4(data.Dataset):
 
         return X1s1, X1s2, X2s1, X2s2, labels   
 
+############################
+# Train and Test data agmententations
 train_transforms = transforms.Compose([
         transforms.ToPILImage(mode='L'),
         transforms.Resize((img_size,img_size)),
@@ -85,7 +84,6 @@ train_transforms = transforms.Compose([
         transforms.CenterCrop(img_size),
         transforms.ToTensor(),
 ])
-
         
 test_transforms = transforms.Compose([
         transforms.ToPILImage(mode='L'),
@@ -96,6 +94,8 @@ test_transforms = transforms.Compose([
 
 
 torch.set_printoptions(linewidth=120)
+############################
+# Load the Data and Create the Batches
 
 tr_path = './NumpysSevSegZ2/Train5'
 vl_path = './NumpysSevSegZ2/Val5'
@@ -117,7 +117,8 @@ test_set = Covid_loader_pt4(
         transform=test_transforms
 )
 
-#######
+############################
+# Loss Function
 class FocalLoss(nn.Module):
     "Non weighted version of Focal Loss"
     def __init__(self, gamma=1.5):
@@ -130,10 +131,13 @@ class FocalLoss(nn.Module):
         pt = torch.exp(-BCE_loss)
         F_loss = (1-pt)**self.gamma * BCE_loss
         return F_loss.mean()
-    
+############################
+# Function for calculating the correct prediction  
+
 def get_num_correct(preds, labels):
     return preds.argmax(dim=1).eq(labels).sum().item()     
-
+############################
+# The Proposed 2B-InceptResnet Architecture
 class TwoInputsNet1(nn.Module):
     def __init__(self):
         super(TwoInputsNet1, self).__init__()
@@ -143,7 +147,6 @@ class TwoInputsNet1(nn.Module):
         self.encoder3 =  nn.Conv2d(6, 3, kernel_size = 3, stride = 1, padding = 1)
 
         self.model = timm.create_model('inception_resnet_v2', pretrained=True)
-
         self.model.classif = nn.Linear(in_features=1536, out_features=4, bias=True)
         self.act = nn.ReLU(inplace=True)
 
@@ -156,20 +159,15 @@ class TwoInputsNet1(nn.Module):
     
 class TwoInputsNet(nn.Module):
     def __init__(self):
-        super(TwoInputsNet, self).__init__()
-#/data/3rd COV19D Competition/Final Severity 2/Models_inf/Inceptres3216Z2inf  
-#/data/3rd COV19D Competition/Final Severity 2/Models_inf/Inceptres3216Zl/Models      
+        super(TwoInputsNet, self).__init__()     
         self.model1 =  TwoInputsNet1()
-        # self.model1.load_state_dict(torch.load('./Models_inf/Inceptres3216Z2inf/Models/0_bt.pt'))
         self.model2 =  TwoInputsNet1()
-        # self.model2.load_state_dict(torch.load('./Models_inf/Inceptres3216Zl/Models/1_bt.pt'))
         self.model1.model.classif = nn.Identity()
         self.model2.model.classif = nn.Identity()
 
         self.fc = nn.Sequential(nn.Linear(in_features=1536*2, out_features=1536, bias=True),
                                 nn.ReLU(True),
                                 nn.Linear(1536, 4))
-
 
     def forward(self, input1, input2, inpt1, inpt2):
         out1 = self.model1(input1, input2)
@@ -179,27 +177,8 @@ class TwoInputsNet(nn.Module):
     
 ####################################
 
-torch.set_grad_enabled(True)
-torch.set_printoptions(linewidth=120)    
-
-
-def MAE_distance(preds, labels):
-    return torch.sum(torch.abs(preds - labels))
-
-def Adaptive_loss(preds, labels, sigma):
-    mse = (1+sigma)*((preds - labels)**2)
-    mae = sigma + (torch.abs(preds - labels))
-    return torch.mean(mse/mae)
-
-def PC_mine(preds, labels):
-    dem = np.sum((preds - np.mean(preds))*(labels - np.mean(labels)))
-    mina = (np.sqrt(np.sum((preds - np.mean(preds))**2)))*(np.sqrt(np.sum((labels - np.mean(labels))**2)))
-    return dem/mina 
-
-
-device = torch.device("cuda:0") 
-# model = TwoInputsNet().to(device)     
-train_loader = torch.utils.data.DataLoader(train_set, batch_size = 8, shuffle = True)      
+device = torch.device("cuda:0")    
+train_loader = torch.utils.data.DataLoader(train_set, batch_size = 16, shuffle = True)      
 validate_loader = torch.utils.data.DataLoader(test_set, batch_size = 32)
 criterion = FocalLoss()
 
@@ -211,18 +190,15 @@ Acc_best = -2
 saving_models = "./Models2D"
 if not os.path.exists(saving_models):
     os.makedirs(saving_models)
-# name = './Models 3df/Inceptres2_2inp2_focal_best.pt'
 
 modl_n = '2D_F5'
 modl_nn = 'UNet'
+runs = 2
 
-for ii in range(2):
-# for itr in range(runs):
-    ii += 2
+for ii in range(rans):
     model_sp = saving_models +"/" + modl_n + "/Models"
     if not os.path.exists(model_sp):
         os.makedirs(model_sp)
-    ############################
     
     name_model_final = model_sp+ '/' + str(ii) + '_fi.pt'
     name_model_bestF1 =  model_sp+ '/' + str(ii) + '_bt.pt'
@@ -238,7 +214,7 @@ for ii in range(2):
     Accracy_tr = []
     Accracy_ts = []
     model = TwoInputsNet().to(device) 
-    ##################################   20 0.0001  ############################################################    
+    ##################################   
     for epoch in range(40):
         epoch_count.append(epoch)
         lr = 0.0001
@@ -352,11 +328,8 @@ for ii in range(2):
             Acc_best = Acc_best2
             torch.save(model.state_dict(), name_model_bestF1)
     
-    print(Acc_best)
-    
-    
+    print(Acc_best)    
     model.load_state_dict(torch.load(name_model_bestF1))
-
     ###########################
     
     label_f1vl = []
